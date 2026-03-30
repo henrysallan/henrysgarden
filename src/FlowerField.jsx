@@ -1,6 +1,7 @@
 import { useMemo, useRef, useEffect } from 'react'
 import { useFrame } from '@react-three/fiber'
 import * as THREE from 'three'
+import { sampleBezier, bezierTangent, bezierLength } from './BranchNetwork'
 
 // Simple seeded PRNG (Mulberry32)
 function mulberry32(seed) {
@@ -21,12 +22,11 @@ function gaussRng(rng) {
   return (rng() + rng() + rng()) / 3 * 2 - 1
 }
 
-// Power-curve distribution: dense at center, gradual tail toward edges
-// sign * |u|^power — power > 1 concentrates toward center
-function slopedRng(rng, power = 1.2) {
-  const u = rng() * 2 - 1 // uniform in [-1, 1]
-  const sign = u < 0 ? -1 : 1
-  return sign * Math.pow(Math.abs(u), power)
+// Gaussian offset via Box-Muller — dense center, smooth infinite tail
+function gaussianOffset(rng) {
+  const u1 = Math.max(rng(), 1e-10) // avoid log(0)
+  const u2 = rng()
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2)
 }
 
 // Hash matching GLSL: fract(sin(n) * 43758.5453)
@@ -249,7 +249,7 @@ export function FlowerField({
     const { edges, nodes } = treeData
     const rng = mulberry32(42)
     const items = []
-    const edgeLengths = edges.map((e) => e.fromPos.distanceTo(e.toPos))
+    const edgeLengths = edges.map((e) => bezierLength(e))
     const totalLength = edgeLengths.reduce((a, b) => a + b, 0)
 
     // Build node-level lookup for depth-based scatter width
@@ -269,13 +269,14 @@ export function FlowerField({
       }
       const edge = edges[edgeIdx]
       const t = rng()
-      const baseX = lerp(edge.fromPos.x, edge.toPos.x, t)
-      const baseZ = lerp(edge.fromPos.z, edge.toPos.z, t)
-      const dx = edge.toPos.x - edge.fromPos.x
-      const dz = edge.toPos.z - edge.fromPos.z
-      const len = Math.sqrt(dx * dx + dz * dz) || 1
-      const perpX = -dz / len
-      const perpZ = dx / len
+      // Sample position along the cubic bezier
+      const pt = sampleBezier(edge, t)
+      const baseX = pt.x
+      const baseZ = pt.z
+      // Get tangent direction at this point to compute perpendicular offset
+      const tan = bezierTangent(edge, t)
+      const perpX = -tan.z
+      const perpZ = tan.x
 
       // Depth-based scatter: wider as we go deeper in the tree
       const fromLevel = nodeLevel.get(edge.from) ?? 0
@@ -283,24 +284,29 @@ export function FlowerField({
       const edgeDepth = lerp(fromLevel, toLevel, t) / maxLevel // 0→1
       const sw = lerp(swMin, swMax, edgeDepth)
 
-      // Sloped falloff: dense center, gradual tail
-      const offset = slopedRng(rng) * sw
+      // Gaussian falloff: dense center, smooth gradual tail (no hard cutoff)
+      const rawG = gaussianOffset(rng)
+      const offset = rawG * sw * 0.45
       const x = baseX + perpX * offset
       const z = baseZ + perpZ * offset
+
+      // Flowers further from the path shrink for a natural taper
+      const dist = Math.abs(rawG)
+      const edgeScale = Math.exp(-dist * dist * 0.18)
 
       items.push({
         key: i,
         edgeIdx,
         edgeT: t,
         position: [x, 0, z],
-        stemLength: lerp(stemLength[0], stemLength[1], rng()),
+        stemLength: lerp(stemLength[0], stemLength[1], rng()) * edgeScale,
         stemSegments: Math.round(lerp(stemSegments[0], stemSegments[1], rng())),
         stemNoiseStrength: lerp(stemNoiseStrength[0], stemNoiseStrength[1], rng()),
-        stemRadius: lerp(stemRadius[0], stemRadius[1], rng()),
-        petalCount: Math.round(lerp(petalCount[0], petalCount[1], rng())),
-        petalLength: lerp(petalLength[0], petalLength[1], rng()),
-        petalWidth: lerp(petalWidth[0], petalWidth[1], rng()),
-        centerRadius: lerp(centerRadius[0], centerRadius[1], rng()),
+        stemRadius: lerp(stemRadius[0], stemRadius[1], rng()) * edgeScale,
+        petalCount: Math.round(lerp(petalCount[0], petalCount[1], rng()) * edgeScale),
+        petalLength: lerp(petalLength[0], petalLength[1], rng()) * edgeScale,
+        petalWidth: lerp(petalWidth[0], petalWidth[1], rng()) * edgeScale,
+        centerRadius: lerp(centerRadius[0], centerRadius[1], rng()) * edgeScale,
         seed: i * 137 + 7,
       })
     }

@@ -298,9 +298,13 @@ export function PostLines({
   }, [size, gl, colorTarget, normalTarget, maskTarget])
 
   // --- Sync uniforms with props ---
+  // Compensate hatching scale for screen resolution so lines look the same
+  // density on mobile as on a MacBook Pro (~1440px CSS width).
+  const REF_WIDTH = 1440
   useEffect(() => {
     const u = shaderMat.uniforms
-    u.scale.value = scale
+    const resScale = REF_WIDTH / size.width
+    u.scale.value = scale * resScale
     u.noiseScale.value = noiseScale
     u.thickness.value = thickness
     u.noisiness.value = noisiness
@@ -311,7 +315,7 @@ export function PostLines({
     u.paperThreshold.value = paperThreshold
     u.networkInkColor.value.set(networkInkColor)
     u.networkGlow.value = networkGlow
-  }, [scale, noiseScale, thickness, noisiness, angle, contour, divergence, inkColor, paperThreshold, networkInkColor, networkGlow, shaderMat])
+  }, [scale, noiseScale, thickness, noisiness, angle, contour, divergence, inkColor, paperThreshold, networkInkColor, networkGlow, shaderMat, size])
 
   // --- Cleanup ---
   useEffect(() => {

@@ -5,53 +5,121 @@ import { useGLTF, Billboard, Text } from '@react-three/drei'
 
 /* ── generate the branching tree ─────────────────────────────── */
 
+/** Sample a point on a cubic bezier edge at parameter t ∈ [0,1] */
+export function sampleBezier(edge, t) {
+  const u = 1 - t
+  const uu = u * u
+  const uuu = uu * u
+  const tt = t * t
+  const ttt = tt * t
+  return new THREE.Vector3(
+    uuu * edge.fromPos.x + 3 * uu * t * edge.cp1.x + 3 * u * tt * edge.cp2.x + ttt * edge.toPos.x,
+    uuu * edge.fromPos.y + 3 * uu * t * edge.cp1.y + 3 * u * tt * edge.cp2.y + ttt * edge.toPos.y,
+    uuu * edge.fromPos.z + 3 * uu * t * edge.cp1.z + 3 * u * tt * edge.cp2.z + ttt * edge.toPos.z,
+  )
+}
+
+/** Get the tangent direction of a cubic bezier at parameter t */
+export function bezierTangent(edge, t) {
+  const u = 1 - t
+  const uu = u * u
+  const tt = t * t
+  return new THREE.Vector3(
+    -3 * uu * edge.fromPos.x + 3 * (uu - 2 * u * t) * edge.cp1.x + 3 * (2 * u * t - tt) * edge.cp2.x + 3 * tt * edge.toPos.x,
+    -3 * uu * edge.fromPos.y + 3 * (uu - 2 * u * t) * edge.cp1.y + 3 * (2 * u * t - tt) * edge.cp2.y + 3 * tt * edge.toPos.y,
+    -3 * uu * edge.fromPos.z + 3 * (uu - 2 * u * t) * edge.cp1.z + 3 * (2 * u * t - tt) * edge.cp2.z + 3 * tt * edge.toPos.z,
+  ).normalize()
+}
+
+/** Approximate arc length of a cubic bezier by summing N linear segments */
+export function bezierLength(edge, segments = 32) {
+  let len = 0
+  let prev = sampleBezier(edge, 0)
+  for (let i = 1; i <= segments; i++) {
+    const pt = sampleBezier(edge, i / segments)
+    len += prev.distanceTo(pt)
+    prev = pt
+  }
+  return len
+}
+
+function makeBezierEdge(id, from, to, fromPos, toPos, cpPull) {
+  // Direction vector
+  const dx = toPos.x - fromPos.x
+  const dz = toPos.z - fromPos.z
+  // cp1 pulls from fromPos in the x-forward direction, cp2 pulls back toward toPos
+  const cp1 = new THREE.Vector3(
+    fromPos.x + dx * cpPull,
+    0,
+    fromPos.z,
+  )
+  const cp2 = new THREE.Vector3(
+    toPos.x - dx * cpPull,
+    0,
+    toPos.z,
+  )
+  return { id, from, to, fromPos: fromPos.clone(), toPos: toPos.clone(), cp1, cp2 }
+}
+
 export function generateBranchTree(branchLength, spreadAngle, decay) {
   const nodes = []
   const edges = []
   let nextId = 0
   let edgeId = 0
+  const cpPull = 0.35 // how far control points pull (fraction of dx)
 
-  const origin = new THREE.Vector3(0, 0, 0)
-  const rootId = nextId++
-  nodes.push({ id: rootId, pos: origin.clone(), level: 0, parentId: null })
+  const xStep = branchLength
+  const zSpread = branchLength * Math.sin(spreadAngle) * decay
 
-  // Level 1 – 3 branches from centre, 120° apart
-  const L1 = []
-  for (let i = 0; i < 3; i++) {
-    const a = (i / 3) * Math.PI * 2
-    const dir = new THREE.Vector3(Math.cos(a), 0, Math.sin(a))
-    const end = origin.clone().add(dir.clone().multiplyScalar(branchLength))
-    const id = nextId++
-    nodes.push({ id, pos: end.clone(), level: 1, parentId: rootId })
-    edges.push({ id: edgeId++, from: rootId, to: id, fromPos: origin.clone(), toPos: end.clone() })
-    L1.push({ id, pos: end, dir })
-  }
+  // Layer 0: single origin node
+  const n0 = { id: nextId++, pos: new THREE.Vector3(0, 0, 0), level: 0, parentId: null }
+  nodes.push(n0)
 
-  // Level 2 – each L1 splits into 2
-  const len2 = branchLength * decay
-  const L2 = []
-  for (const parent of L1) {
-    for (const sign of [1, -1]) {
-      const d = parent.dir.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), sign * spreadAngle)
-      const end = parent.pos.clone().add(d.clone().multiplyScalar(len2))
-      const id = nextId++
-      nodes.push({ id, pos: end.clone(), level: 2, parentId: parent.id })
-      edges.push({ id: edgeId++, from: parent.id, to: id, fromPos: parent.pos.clone(), toPos: end.clone() })
-      L2.push({ id, pos: end, dir: d })
-    }
-  }
+  // Layer 1: diverge → 2 nodes
+  const n1 = { id: nextId++, pos: new THREE.Vector3(xStep, 0, zSpread), level: 1, parentId: 0 }
+  const n2 = { id: nextId++, pos: new THREE.Vector3(xStep, 0, -zSpread), level: 1, parentId: 0 }
+  nodes.push(n1, n2)
+  edges.push(
+    makeBezierEdge(edgeId++, 0, 1, n0.pos, n1.pos, cpPull),
+    makeBezierEdge(edgeId++, 0, 2, n0.pos, n2.pos, cpPull),
+  )
 
-  // Level 3 – each L2 splits into 2
-  const len3 = len2 * decay
-  for (const parent of L2) {
-    for (const sign of [1, -1]) {
-      const d = parent.dir.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), sign * spreadAngle)
-      const end = parent.pos.clone().add(d.clone().multiplyScalar(len3))
-      const id = nextId++
-      nodes.push({ id, pos: end.clone(), level: 3, parentId: parent.id })
-      edges.push({ id: edgeId++, from: parent.id, to: id, fromPos: parent.pos.clone(), toPos: end.clone() })
-    }
-  }
+  // Layer 2: diverge → 4 nodes (each L1 splits into 2)
+  const x2 = xStep * 2.5
+  const zOuter = zSpread * 1.5
+  const zInner = zSpread * 0.5
+  const n3 = { id: nextId++, pos: new THREE.Vector3(x2, 0, zOuter), level: 2, parentId: 1 }
+  const n4 = { id: nextId++, pos: new THREE.Vector3(x2, 0, zInner), level: 2, parentId: 1 }
+  const n5 = { id: nextId++, pos: new THREE.Vector3(x2, 0, -zInner), level: 2, parentId: 2 }
+  const n6 = { id: nextId++, pos: new THREE.Vector3(x2, 0, -zOuter), level: 2, parentId: 2 }
+  nodes.push(n3, n4, n5, n6)
+  edges.push(
+    makeBezierEdge(edgeId++, 1, 3, n1.pos, n3.pos, cpPull),
+    makeBezierEdge(edgeId++, 1, 4, n1.pos, n4.pos, cpPull),
+    makeBezierEdge(edgeId++, 2, 5, n2.pos, n5.pos, cpPull),
+    makeBezierEdge(edgeId++, 2, 6, n2.pos, n6.pos, cpPull),
+  )
+
+  // Layer 3: converge → 2 nodes (top pair + bottom pair merge)
+  const x3 = x2 + xStep * 1.8
+  const n7 = { id: nextId++, pos: new THREE.Vector3(x3, 0, zSpread), level: 3, parentId: 3 }
+  const n8 = { id: nextId++, pos: new THREE.Vector3(x3, 0, -zSpread), level: 3, parentId: 6 }
+  nodes.push(n7, n8)
+  edges.push(
+    makeBezierEdge(edgeId++, 3, 7, n3.pos, n7.pos, cpPull),
+    makeBezierEdge(edgeId++, 4, 7, n4.pos, n7.pos, cpPull),
+    makeBezierEdge(edgeId++, 5, 8, n5.pos, n8.pos, cpPull),
+    makeBezierEdge(edgeId++, 6, 8, n6.pos, n8.pos, cpPull),
+  )
+
+  // Layer 4: converge → 1 node (final merge)
+  const x4 = x3 + xStep * 1.8
+  const n9 = { id: nextId++, pos: new THREE.Vector3(x4, 0, 0), level: 4, parentId: 7 }
+  nodes.push(n9)
+  edges.push(
+    makeBezierEdge(edgeId++, 7, 9, n7.pos, n9.pos, cpPull),
+    makeBezierEdge(edgeId++, 8, 9, n8.pos, n9.pos, cpPull),
+  )
 
   return { nodes, edges }
 }
@@ -115,7 +183,10 @@ export function BranchNetwork({
   const nodeRotations = useMemo(() => {
     const rotations = {}
     for (const node of nodes) {
-      if (node.level === 0) continue
+      if (node.level === 0) {
+        rotations[node.id] = Math.PI / 2 // origin faces +x (right)
+        continue
+      }
       const dir = new THREE.Vector2(node.pos.x, node.pos.z)
       const angle = Math.atan2(dir.x, dir.y)
       rotations[node.id] = angle
@@ -123,21 +194,25 @@ export function BranchNetwork({
     return rotations
   }, [nodes])
 
-  // Pre-compute children for each visible node
+  // Pre-compute children for each node from outgoing EDGES (not parentId)
+  // This ensures convergent nodes appear as children of all their source nodes
   const nodeChildren = useMemo(() => {
     const map = {}
     for (const node of nodes) {
-      if (node.level === 0) continue
-      map[node.id] = getChildNodeIds(node.id, nodes)
+      const childIds = treeData.edges
+        .filter((e) => e.from === node.id)
+        .map((e) => e.to)
+      map[node.id] = [...new Set(childIds)]
     }
     return map
-  }, [nodes])
+  }, [nodes, treeData.edges])
 
-  // Pre-compute the edge index that leads TO each node
-  const nodeEdgeIdx = useMemo(() => {
+  // Pre-compute ALL edge indices leading TO each node (supports convergent edges)
+  const nodeEdgeIndices = useMemo(() => {
     const map = {}
     treeData.edges.forEach((e, idx) => {
-      map[e.to] = idx
+      if (!map[e.to]) map[e.to] = []
+      map[e.to].push(idx)
     })
     return map
   }, [treeData.edges])
@@ -145,10 +220,10 @@ export function BranchNetwork({
   return (
     <group ref={groupRef} position={[0, height, 0]}>
       {nodes
-        .filter(({ id, level }) => level > 0 && visibleNodeIds.has(id))
+        .filter(({ id }) => visibleNodeIds.has(id))
         .map(({ id, pos }) => {
           const children = nodeChildren[id] || []
-          const edgeIdx = nodeEdgeIdx[id]
+          const edgeIndices = nodeEdgeIndices[id] || []
           return (
             <group key={id} position={pos}>
               {/* Mailbox — scales in with flower growth */}
@@ -157,26 +232,24 @@ export function BranchNetwork({
                 scale={mailboxScale}
                 rotation={nodeRotations[id] ?? 0}
                 growthRef={growthRef}
-                edgeIdx={edgeIdx}
+                edgeIndices={edgeIndices}
               />
-              {/* Two letters floating above — one per child branch */}
-              {children.length > 0 && children.map((childId, i) => (
-                <SpinningLetter
-                  key={childId}
-                  childId={childId}
+              {/* Single letter floating above — triggers all outgoing edges */}
+              <SpinningLetter
+                  key={`letter-${id}`}
+                  childId={id}
                   scene={letterScene}
                   scale={letterScale}
-                  offsetX={(i === 0 ? -1 : 1) * letterSpread}
+                  offsetX={0}
                   offsetY={letterHeight}
                   color={letterColor}
                   baseRotation={letterRotation}
                   clickRadius={clickRadius}
-                  onLetterClick={() => onLetterClick(childId)}
+                  onLetterClick={() => onLetterClick(id)}
                   growthRef={growthRef}
-                  edgeIdx={edgeIdx}
+                  edgeIndices={edgeIndices}
                   dismissedLetterRef={dismissedLetterRef}
                 />
-              ))}
             </group>
           )
         })}
@@ -187,8 +260,6 @@ export function BranchNetwork({
         onCardDismiss={onCardDismiss}
         dismissedLetterRef={dismissedLetterRef}
         nodes={nodes}
-        nodeChildren={nodeChildren}
-        letterSpread={letterSpread}
         letterHeight={letterHeight}
       />
     </group>
@@ -199,47 +270,29 @@ export function BranchNetwork({
 const FONT_URL = '/fonts/PPMondwest-Bold.ttf'
 
 export const LETTER_TEXT = {
-  // Level 2 — children of the 3 L1 mailboxes
-  4:  'You taught yourself 3D and started a lab while in college in Ohio. How did that self-directed environment shape the way you learn new tools today?',
-  5:  "Between 3D modeling, traditional design, and new tools like 'vibecoding,' how do you decide which medium is right for a specific idea?",
-  6:  'Where do philosophy and visual design actually intersect in your day-to-day work?',
-  7:  'Is there a specific philosophical concept or text that has fundamentally changed the way you approach making things?',
-  8:  'How does your creative process shift when moving between freelance work and studio environments like The Collected Works or VM Groupe?',
-  9:  'Has transitioning from Ohio to the New York design scene changed the kind of work you want to create?',
-  // Level 3 — children of the 6 L2 mailboxes
-  10: "Since you learned by watching YouTube VFX artists, how much of your current workflow involves reverse-engineering other people's techniques versus inventing your own from scratch?",
-  11: "How does that realization—that almost any technical skill is figure-out-able—change the scale or ambition of the projects you pitch today?",
-  12: "When you build custom code to procedurally animate an idea, how do you know when the code is 'done' and the animation actually feels right?",
-  13: "You mentioned using 3D tools for 2D results. Can you share a specific project where using the 'wrong' tool yielded a better aesthetic than the industry standard would have?",
-  14: "How do you practically design for 'the humanity of the other' when you are working under the constraints of a fast-paced commercial brief?",
-  15: 'You mentioned paying attention to history in your art. Are there specific design movements or historical periods you find yourself in dialogue with right now?',
-  16: "What does a 'rich' moment in digital design actually look or feel like to you? Is it about friction, clarity, surprise, or something else?",
-  17: 'When a commercial project naturally lacks that philosophical richness, how do you manufacture the drive to see it through to a high standard?',
-  18: 'In your personal work, where you have total agency, how do you set constraints for yourself so that you actually finish the project?',
-  19: 'When working on a highly guided studio project, where do you find the space to inject your own specific perspective or craft?',
-  20: "Do you think being removed from a formal 'design scene' in Ohio allowed you to develop a more idiosyncratic style, free from local industry trends?",
-  21: 'Now that you are working in New York, what specific cultural conversations or milieus do you feel your work is actively participating in?',
+  0: 'Nick Ellenoff',
+  1: 'Yan Kulveit',
+  2: 'Josh Citarella',
+  3: 'Yan Xiao',
+  4: 'Chloe',
+  5: 'Brad Troemel',
+  6: 'Christian Townsend',
+  7: 'Justin Colt',
+  8: 'Eli',
+  9: ' ... ',
 }
 
 export const ANSWER_TEXT = {
-  4:  'Placeholder answer for 1A.',
-  5:  'Placeholder answer for 1B.',
-  6:  'Placeholder answer for 2C.',
-  7:  'Placeholder answer for 2D.',
-  8:  'Placeholder answer for 3E.',
-  9:  'Placeholder answer for 3F.',
-  10: 'Placeholder answer for 1A-1.',
-  11: 'Placeholder answer for 1A-2.',
-  12: 'Placeholder answer for 1B-1.',
-  13: 'Placeholder answer for 1B-2.',
-  14: 'Placeholder answer for 2C-1.',
-  15: 'Placeholder answer for 2C-2.',
-  16: 'Placeholder answer for 2D-1.',
-  17: 'Placeholder answer for 2D-2.',
-  18: 'Placeholder answer for 3E-1.',
-  19: 'Placeholder answer for 3E-2.',
-  20: 'Placeholder answer for 3F-1.',
-  21: 'Placeholder answer for 3F-2.',
+  0: 'Kindling and nurturing curiosity, letting your curiosity be your guide and your drive is a superpower.',
+  1: 'Attention to your internal life, modeling the brain, drinking tea, and the future of humanity are all connected.',
+  2: 'Research, Design, and Community are as vital sources of artistic inspiration as emotion and experience. To make art is to engage in a conversation with a community.',
+  3: 'The most interesting philosophical questions are rooted in the human capacity for attention. Intention, ritual, internal life, artistic practice are the real sites of philosophical practice.',
+  4: 'The natural world, plant and animal life are some of our richest sources of knowledge and inspiration.',
+  5: 'The platform itself is a vessel for creative expression. The post, the comment, the live code is a form in itself.',
+  6: 'A procedural concept, a piece of code, a shader network, a simulation, is itself a design decision. The design decisions available to your imagination are constrained by your knowledge of the computational building blocks.',
+  7: '2 hours of research and 20 minutes of execution means you are doing something right.',
+  8: 'Slow methodical practice with paper, pencils, and friends.',
+  9: "Every person I've learned from started as someone I hadn't yet met.",
 }
 
 /* ── temp vectors (hoisted to avoid per-frame allocation) ── */
@@ -253,7 +306,7 @@ const _lookTarget = new THREE.Vector3()
  * ── Single card that morphs between hover (small, above letter)
  *    and expanded (large, centred in front of camera).
  */
-function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismissedLetterRef, nodes, nodeChildren, letterSpread, letterHeight }) {
+function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismissedLetterRef, nodes, letterHeight }) {
   const groupRef = useRef()
   const bgMeshRef = useRef()
   const bgMatRef = useRef()
@@ -281,7 +334,7 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
   /* Card dimensions in local space */
   const MAX_HOVER_W = 1.6   // max width for hover card text
   const MIN_HOVER_W = 0.5, MIN_HOVER_H = 0.2  // minimum hover card size
-  const EXP_W = 0.8, EXP_H = 1.2
+  const EXP_W = 0.8, EXP_H = 0.55
   const PAD = 0.06
 
   useFrame(() => {
@@ -348,14 +401,14 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
     const activeId = expandedId ?? lockedId ?? lastExpandedId.current
     if (activeId !== null && activeId !== lastLockedId.current) {
       lastLockedId.current = activeId
-      const txt = LETTER_TEXT[activeId] || ''
-      // Hover card: letter format with To/From lines
+      const name = LETTER_TEXT[activeId] || ''
+      // Hover card: just the name, centred
       if (questionRef.current) {
-        questionRef.current.text = `To Henry,\n\n${txt}\n\nBest, Gemini`
+        questionRef.current.text = name
         questionRef.current.sync()
       }
-      // Expanded card: just the question
-      if (questionExpRef.current) { questionExpRef.current.text = txt; questionExpRef.current.sync() }
+      // Expanded card: name as title
+      if (questionExpRef.current) { questionExpRef.current.text = name; questionExpRef.current.sync() }
     }
     if (expandedId !== null && expandedId !== lastExpandedId.current) {
       lastExpandedId.current = expandedId
@@ -369,15 +422,9 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
     // Compute hover position (above the letter)
     const relevantId = expandedId ?? lockedId ?? dismissNodeId.current
     if (relevantId !== null) {
-      const childNode = nodes.find((n) => n.id === relevantId)
-      if (childNode) {
-        const parentNode = nodes.find((n) => n.id === childNode.parentId)
-        if (parentNode) {
-          const siblings = nodeChildren[parentNode.id] || []
-          const idx = siblings.indexOf(relevantId)
-          const ox = (idx === 0 ? -1 : 1) * letterSpread
-          _hoverPos.set(parentNode.pos.x + ox, letterHeight + 1.1, parentNode.pos.z)
-        }
+      const node = nodes.find((n) => n.id === relevantId)
+      if (node) {
+        _hoverPos.set(node.pos.x, letterHeight + 1.1, node.pos.z)
       }
     }
 
@@ -423,7 +470,7 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
     /* ---- Scale ---- */
     const vFov = camera.fov * Math.PI / 180
     const visH = 2 * dist * Math.tan(vFov / 2)
-    const expandedScale = (visH * 0.65) / EXP_H
+    const expandedScale = (visH * 0.45) / EXP_H
 
     // Scale grows smoothly during phase 2 only; stays 1 during phase 1
     const groupScale = THREE.MathUtils.lerp(1, expandedScale, growT)
@@ -477,7 +524,7 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
     const hoverAlpha = Math.max(0, 1 - t / 0.15) * opacity.current
     if (questionRef.current) {
       questionRef.current.material.opacity = hoverAlpha
-      questionRef.current.position.set(-w / 2 + PAD, h / 2 - PAD, 0.001)
+      questionRef.current.position.set(0, 0, 0.001)
       questionRef.current.maxWidth = MAX_HOVER_W - PAD * 2
     }
 
@@ -493,7 +540,7 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
     const divY = h / 2 - h * 0.22
     if (dividerRef.current) {
       dividerRef.current.position.set(0, divY, 0.001)
-      dividerRef.current.scale.x = innerW / (hW - PAD * 2 + 0.001)
+      dividerRef.current.scale.x = innerW / 1.4  // 1.4 = geometry width
     }
     // Answer just below divider
     if (answerRef.current) {
@@ -536,18 +583,18 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
         />
       </mesh>
 
-      {/* Question text — HOVER state (top-left aligned) */}
+      {/* Question text — HOVER state (centred name) */}
       <Text
         ref={(obj) => { questionRef.current = obj; tagCursor(obj) }}
         font={FONT_URL}
         position={[0, 0, 0.001]}
-        fontSize={0.07}
+        fontSize={0.08}
         color="#000000"
-        anchorX="left"
-        anchorY="top"
+        anchorX="center"
+        anchorY="middle"
         maxWidth={MAX_HOVER_W - PAD * 2}
         lineHeight={1.3}
-        textAlign="left"
+        textAlign="center"
         renderOrder={1000}
         material-depthTest={false}
         material-depthWrite={false}
@@ -638,7 +685,7 @@ function LetterPopup({ lockedLetterRef, expandedNodeRef, onCardDismiss, dismisse
 
 /* ── Mailbox — scales in with edge growth ──────────────────── */
 
-function MailboxWithGrowth({ scene, scale, rotation, growthRef, edgeIdx }) {
+function MailboxWithGrowth({ scene, scale, rotation, growthRef, edgeIndices }) {
   const groupRef = useRef()
 
   const cloned = useMemo(() => {
@@ -658,9 +705,10 @@ function MailboxWithGrowth({ scene, scale, rotation, growthRef, edgeIdx }) {
 
   useFrame(() => {
     if (!groupRef.current) return
-    const edgeGrowth = edgeIdx != null && growthRef?.current
-      ? (growthRef.current.get(edgeIdx) ?? 0)
-      : 1
+    let edgeGrowth = 1
+    if (edgeIndices && edgeIndices.length > 0 && growthRef?.current) {
+      edgeGrowth = Math.max(...edgeIndices.map(idx => growthRef.current.get(idx) ?? 0))
+    }
     // Ease-out scale
     const s = 1 - (1 - edgeGrowth) * (1 - edgeGrowth)
     const finalScale = scale * s
@@ -681,7 +729,7 @@ function MailboxWithGrowth({ scene, scale, rotation, growthRef, edgeIdx }) {
 
 const _bbWorldPos = new THREE.Vector3()
 
-function SpinningLetter({ scene, scale, offsetX, offsetY, color = '#ffffff', baseRotation = [0, 0, 0], clickRadius, onLetterClick, growthRef, edgeIdx, childId, dismissedLetterRef }) {
+function SpinningLetter({ scene, scale, offsetX, offsetY, color = '#ffffff', baseRotation = [0, 0, 0], clickRadius, onLetterClick, growthRef, edgeIndices, childId, dismissedLetterRef }) {
   const groupRef = useRef()
   const spinRef = useRef()
   const billboardRef = useRef()
@@ -735,9 +783,10 @@ function SpinningLetter({ scene, scale, offsetX, offsetY, color = '#ffffff', bas
 
     // Scale in with edge growth
     if (groupRef.current) {
-      const edgeGrowth = edgeIdx != null && growthRef?.current
-        ? (growthRef.current.get(edgeIdx) ?? 0)
-        : 1
+      let edgeGrowth = 1
+      if (edgeIndices && edgeIndices.length > 0 && growthRef?.current) {
+        edgeGrowth = Math.max(...edgeIndices.map(idx => growthRef.current.get(idx) ?? 0))
+      }
       const s = 1 - (1 - edgeGrowth) * (1 - edgeGrowth)
       groupRef.current.scale.setScalar(s)
 

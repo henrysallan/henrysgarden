@@ -12,8 +12,8 @@ import * as THREE from 'three'
 function CameraRig() {
   const { fov, offsetX, offsetY, offsetZ } = useControls('Camera', {
     fov: { value: 11, min: 10, max: 120, step: 1 },
-    offsetX: { value: 0.3, min: -20, max: 20, step: 0.1 },
-    offsetY: { value: 0.9, min: -20, max: 20, step: 0.1 },
+    offsetX: { value: -0.1, min: -20, max: 20, step: 0.1 },
+    offsetY: { value: 0.3, min: -20, max: 20, step: 0.1 },
     offsetZ: { value: 0, min: -20, max: 20, step: 0.1 },
   })
   const camera = useThree((s) => s.camera)
@@ -91,7 +91,7 @@ export function Scene() {
 
   const postLines = useControls('Post Lines', {
     enabled: true,
-    scale: { value: 1.4, min: 0.1, max: 2, step: 0.01 },
+    scale: { value: 0.8, min: 0.1, max: 2, step: 0.01 },
     noiseScale: { value: 1.0, min: 0.1, max: 1, step: 0.01 },
     thickness: { value: 0.72, min: 0, max: 1, step: 0.01 },
     noisiness: { value: 0.001, min: 0, max: 0.02, step: 0.001 },
@@ -103,7 +103,7 @@ export function Scene() {
   })
 
   const { count } = useControls('Field', {
-    count: { value: 8000, min: 1, max: 8000, step: 1 },
+    count: { value: 6000, min: 1, max: 8000, step: 1 },
   })
 
   const stem = useControls('Stem', {
@@ -138,7 +138,7 @@ export function Scene() {
 
   const networkCtrl = useControls('Network', {
     height: { value: 0.0, min: 0, max: 5, step: 0.1 },
-    branchLength: { value: 1.6, min: 0.5, max: 8, step: 0.1 },
+    branchLength: { value: 4.0, min: 1, max: 20, step: 0.1 },
     spreadAngle: { value: 0.5, min: 0.1, max: 1.5, step: 0.05 },
     decay: { value: 2.25, min: 0.3, max: 5, step: 0.05 },
     mailboxScale: { value: 0.15, min: 0.05, max: 1, step: 0.01 },
@@ -151,8 +151,8 @@ export function Scene() {
     letterRotZ: { value: 15, min: -180, max: 180, step: 1 },
     clickRadius: { value: 0.3, min: 0.1, max: 2, step: 0.05 },
     color: '#559595',
-    scatterWidthMin: { value: 0.05, min: 0.05, max: 3, step: 0.05 },
-    scatterWidthMax: { value: 1.1, min: 0.05, max: 5, step: 0.05 },
+    scatterWidthMin: { value: 0.7, min: 0.05, max: 3, step: 0.05 },
+    scatterWidthMax: { value: 2.0, min: 0.05, max: 8, step: 0.05 },
   })
 
   const cursorCtrl = useControls('Cursor', {
@@ -177,6 +177,44 @@ export function Scene() {
     [networkCtrl.branchLength, networkCtrl.spreadAngle, networkCtrl.decay],
   )
 
+  // ── Pre-grown flower patch around origin ──
+  const patchTreeData = useMemo(() => {
+    const ARMS = 6
+    const RADIUS = 1.6
+    const nodes = [{ id: 0, pos: new THREE.Vector3(0, 0, 0), level: 0, parentId: null }]
+    const edges = []
+    for (let i = 0; i < ARMS; i++) {
+      const a = (i / ARMS) * Math.PI * 2
+      const endPos = new THREE.Vector3(Math.cos(a) * RADIUS, 0, Math.sin(a) * RADIUS)
+      nodes.push({ id: i + 1, pos: endPos, level: 1, parentId: 0 })
+      const dx = endPos.x
+      const dz = endPos.z
+      const pull = 0.35
+      edges.push({
+        id: i,
+        from: 0,
+        to: i + 1,
+        fromPos: new THREE.Vector3(0, 0, 0),
+        toPos: endPos.clone(),
+        cp1: new THREE.Vector3(dx * pull, 0, dz * pull),
+        cp2: new THREE.Vector3(endPos.x - dx * pull, 0, endPos.z - dz * pull),
+      })
+    }
+    return { nodes, edges }
+  }, [])
+
+  const patchGrowthRef = useRef(new Map())
+  const patchActiveEdges = useMemo(() => {
+    const s = new Set()
+    if (patchTreeData) {
+      for (let i = 0; i < patchTreeData.edges.length; i++) {
+        s.add(i)
+        patchGrowthRef.current.set(i, 1)
+      }
+    }
+    return s
+  }, [patchTreeData])
+
   // ── Interaction state ──
   // visibleNodeIds: which platonic solids are currently shown
   // grownEdges: edges that are fully grown (flowers at growth=1)
@@ -197,47 +235,37 @@ export function Scene() {
     const { nodes } = treeData
     const result = []
     for (const node of nodes) {
-      if (node.level === 0) continue
       if (!visibleNodeIds.has(node.id)) continue
-      const children = nodes.filter((n) => n.parentId === node.id)
-      children.forEach((child, i) => {
-        if (dismissedLetters.has(child.id)) return // skip dismissed letters
-        const ox = (i === 0 ? -1 : 1) * networkCtrl.letterSpread
-        result.push({
-          id: child.id,
-          worldPos: new THREE.Vector3(
-            node.pos.x + ox,
-            networkCtrl.height + networkCtrl.letterHeight,
-            node.pos.z,
-          ),
-        })
+      if (dismissedLetters.has(node.id)) continue // letter already used
+      // Show a letter if this node has outgoing edges or has text content (final node)
+      const hasOutgoing = treeData.edges.some((e) => e.from === node.id)
+      const hasContent = LETTER_TEXT[node.id] !== undefined
+      if (!hasOutgoing && !hasContent) continue
+      result.push({
+        id: node.id,
+        worldPos: new THREE.Vector3(
+          node.pos.x,
+          networkCtrl.height + networkCtrl.letterHeight,
+          node.pos.z,
+        ),
       })
     }
     return result
-  }, [treeData, visibleNodeIds, networkCtrl.height, networkCtrl.letterHeight, networkCtrl.letterSpread, dismissedLetters])
+  }, [treeData, visibleNodeIds, networkCtrl.height, networkCtrl.letterHeight, dismissedLetters])
 
-  // Initialize: L1 mailboxes visible, L1-edge flowers already grown
+  // Initialize: only the origin node visible, no pre-grown edges
+  // Runs only on mount — the diamond topology is fixed, only positions change
+  // when Leva controls are tweaked, so interaction state is preserved.
   useEffect(() => {
-    const l1Ids = new Set(treeData.nodes.filter((n) => n.level === 1).map((n) => n.id))
-    setVisibleNodeIds(l1Ids)
-    // Mark all L1 edges (origin → L1) as already grown
-    const l1Edges = new Set(
-      treeData.edges
-        .map((e, idx) => ({ idx, to: e.to }))
-        .filter(({ to }) => l1Ids.has(to))
-        .map(({ idx }) => idx),
-    )
-    setGrownEdges(l1Edges)
+    setVisibleNodeIds(new Set([0]))
+    setGrownEdges(new Set())
     setGrowingEdges(new Set())
-    // Pre-fill growthRef so flowers render at full size immediately
-    const map = new Map()
-    for (const eIdx of l1Edges) map.set(eIdx, 1)
-    growthRef.current = map
-  }, [treeData])
+    growthRef.current = new Map()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Cutscene state ──
   const [cutsceneActive, setCutsceneActive] = useState(false)
-  const [cutsceneTarget, setCutsceneTarget] = useState(null)
+  const [cutsceneTargets, setCutsceneTargets] = useState(null)
 
   const cutsceneCtrl = useControls('Cutscene', {
     lerpDuration: { value: 3.0, min: 0.3, max: 4, step: 0.1 },
@@ -247,7 +275,7 @@ export function Scene() {
 
   const handleCutsceneComplete = useCallback(() => {
     setCutsceneActive(false)
-    setCutsceneTarget(null)
+    setCutsceneTargets(null)
   }, [])
 
   // Phase 1: Letter clicked → expand the 3D card (no growth yet)
@@ -262,29 +290,33 @@ export function Scene() {
 
   // Phase 2: Card dismissed (X clicked, collapse done) → trigger growth + cutscene
   const handleCardDismiss = useCallback(
-    (childNodeId) => {
+    (nodeId) => {
       setCardExpanded(false)
       window.dispatchEvent(new CustomEvent('card-dismissed', {
         detail: {
-          id: childNodeId,
-          question: LETTER_TEXT[childNodeId] || '',
-          answer: ANSWER_TEXT[childNodeId] || '',
+          id: nodeId,
+          question: LETTER_TEXT[nodeId] || '',
+          answer: ANSWER_TEXT[nodeId] || '',
         },
       }))
 
       // Mark letter as dismissed so hover lock stops
       setDismissedLetters((prev) => {
         const next = new Set(prev)
-        next.add(childNodeId)
+        next.add(nodeId)
         return next
       })
       lockedLetterRef.current = null
 
       const { nodes, edges } = treeData
-      const edgeIdx = edges.findIndex((e) => e.to === childNodeId)
-      if (edgeIdx === -1) return
+      // Find all OUTGOING edges from this node
+      const outEdgeIndices = edges
+        .map((e, idx) => idx)
+        .filter((idx) => edges[idx].from === nodeId)
+      if (outEdgeIndices.length === 0) return
 
-      const childNode = nodes.find((n) => n.id === childNodeId)
+      // Collect all target child node IDs
+      const childNodeIds = outEdgeIndices.map((idx) => edges[idx].to)
 
       // Move any currently growing edges into grown
       setGrownEdges((prev) => {
@@ -293,26 +325,24 @@ export function Scene() {
         return next
       })
 
-      // Start growing just this edge
-      setGrowingEdges(new Set([edgeIdx]))
+      // Start growing all outgoing edges from this node
+      setGrowingEdges(new Set(outEdgeIndices))
 
-      // Reveal the child mailbox
+      // Reveal all target child mailboxes
       setVisibleNodeIds((prev) => {
         const next = new Set(prev)
-        next.add(childNodeId)
+        for (const cid of childNodeIds) next.add(cid)
         return next
       })
 
-      // Trigger the camera cutscene toward the new mailbox
-      // Defer slightly so React can flush state updates (new meshes, etc.)
-      // before the cutscene starts — avoids a frame hitch on the first frame
-      if (childNode) {
-        const tgt = new THREE.Vector3(
-          childNode.pos.x,
-          networkCtrl.height,
-          childNode.pos.z,
-        )
-        setCutsceneTarget(tgt)
+      // Trigger the camera cutscene through all new children in order
+      const uniqueChildIds = [...new Set(childNodeIds)]
+      const childTargets = uniqueChildIds
+        .map((cid) => nodes.find((n) => n.id === cid))
+        .filter(Boolean)
+        .map((n) => new THREE.Vector3(n.pos.x, networkCtrl.height, n.pos.z))
+      if (childTargets.length > 0) {
+        setCutsceneTargets(childTargets)
         requestAnimationFrame(() => {
           setCutsceneActive(true)
         })
@@ -343,19 +373,19 @@ export function Scene() {
         key={`shadow-${sun.shadowMapSize}`}
         castShadow
         position={[
-          10 * Math.cos((sun.angle * Math.PI) / 180) * Math.cos((sun.height * Math.PI) / 180),
-          10 * Math.sin((sun.height * Math.PI) / 180),
-          10 * Math.sin((sun.angle * Math.PI) / 180) * Math.cos((sun.height * Math.PI) / 180),
+          25 * Math.cos((sun.angle * Math.PI) / 180) * Math.cos((sun.height * Math.PI) / 180),
+          25 * Math.sin((sun.height * Math.PI) / 180),
+          25 * Math.sin((sun.angle * Math.PI) / 180) * Math.cos((sun.height * Math.PI) / 180),
         ]}
         intensity={sun.intensity}
         shadow-mapSize-width={sun.shadowMapSize}
         shadow-mapSize-height={sun.shadowMapSize}
-        shadow-camera-left={-15}
-        shadow-camera-right={15}
-        shadow-camera-top={15}
-        shadow-camera-bottom={-15}
+        shadow-camera-left={-35}
+        shadow-camera-right={35}
+        shadow-camera-top={35}
+        shadow-camera-bottom={-35}
         shadow-camera-near={0.1}
-        shadow-camera-far={50}
+        shadow-camera-far={80}
         shadow-bias={-0.001}
       />
 
@@ -363,8 +393,8 @@ export function Scene() {
       <color attach="background" args={['#ffffff']} />
 
       {/* Ground plane */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
-        <planeGeometry args={[50, 50]} />
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[12, 0, 0]} receiveShadow>
+        <planeGeometry args={[120, 120]} />
         <meshStandardMaterial color={sun.floorColor} />
       </mesh>
 
@@ -385,6 +415,28 @@ export function Scene() {
         petalWidth={[petals.widthMin, petals.widthMax]}
         centerRadius={[petals.centerMin, petals.centerMax]}
         scatterWidth={[networkCtrl.scatterWidthMin, networkCtrl.scatterWidthMax]}
+        windSpeed={wind.speed}
+        windStrength={wind.strength}
+        windFrequency={wind.frequency}
+      />
+
+      {/* Origin flower patch — always fully grown */}
+      <FlowerField
+        count={Math.round(count * 0.15)}
+        treeData={patchTreeData}
+        growthRef={patchGrowthRef}
+        growingEdges={patchActiveEdges}
+        stemLength={[stem.lengthMin, stem.lengthMax]}
+        stemSegments={[stem.segmentsMin, stem.segmentsMax]}
+        stemNoiseStrength={[stem.noiseMin, stem.noiseMax]}
+        stemRadius={[stem.radiusMin, stem.radiusMax]}
+        tubularSegments={stem.tubularSegments}
+        radialSegments={stem.radialSegments}
+        petalCount={[petals.countMin, petals.countMax]}
+        petalLength={[petals.lengthMin, petals.lengthMax]}
+        petalWidth={[petals.widthMin, petals.widthMax]}
+        centerRadius={[petals.centerMin, petals.centerMax]}
+        scatterWidth={[0.8, 1.2]}
         windSpeed={wind.speed}
         windStrength={wind.strength}
         windFrequency={wind.frequency}
@@ -416,7 +468,7 @@ export function Scene() {
       {/* Camera cutscene on envelope trigger */}
       <CameraCutscene
         active={cutsceneActive}
-        targetPos={cutsceneTarget}
+        targets={cutsceneTargets}
         lerpDuration={cutsceneCtrl.lerpDuration}
         holdDuration={cutsceneCtrl.holdDuration}
         zoomAmount={cutsceneCtrl.zoomAmount}

@@ -3,15 +3,19 @@ import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 
 /**
- * Phases:
- *   0 → idle (no cutscene)
- *   1 → lerping camera + target from A → B  (ease-in-out + zoom in)
- *   2 → holding at B
- *   3 → lerping camera + target from B → A  (ease-in-out + zoom out)
- *   then fires onComplete and resets to 0
+ * Multi-target camera cutscene.
+ *
+ * Accepts `targets` — an array of world-space positions to visit in order.
+ * The camera lerps to each target, holds briefly, then lerps to the next.
+ * After the last target it lerps back to the original saved position.
+ *
+ * Internal phase encoding:
+ *   0         → idle
+ *   odd  (1, 3, 5 …) → lerping toward a destination
+ *   even (2, 4, 6 …) → holding at that destination
+ *   final odd         → lerping back to saved position
  */
 
-// Smooth ease-in-out (cubic)
 function easeInOut(t) {
   return t < 0.5
     ? 4 * t * t * t
@@ -19,54 +23,64 @@ function easeInOut(t) {
 }
 
 export function CameraCutscene({
-  /** World-space XZ position of the new mailbox to look at */
+  /** Array of world-space positions to visit (or a single Vector3 for back-compat) */
+  targets,
+  /** @deprecated — use `targets` instead */
   targetPos,
-  /** How long to lerp in / out (seconds) */
   lerpDuration = 1.2,
-  /** How long to hold at the destination (seconds) */
   holdDuration = 1.0,
-  /** Y-offset for the look-at target above the mailbox */
   lookAtYOffset = 0.5,
-  /** How much closer to zoom (multiplier — 0.85 = 15% closer) */
   zoomAmount = 0.85,
-  /** Called when the full cutscene finishes */
   onComplete,
-  /** Set to true to start, reset to false externally via onComplete */
   active = false,
 }) {
   const { camera } = useThree()
-  const phaseRef = useRef(0)
+  const phaseRef = useRef(0)       // current phase index
   const timerRef = useRef(0)
-  const savedRef = useRef({ pos: new THREE.Vector3(), tgt: new THREE.Vector3() })
-  const destPosRef = useRef(new THREE.Vector3())
-  const destTgtRef = useRef(new THREE.Vector3())
   const controlsRef = useRef(null)
   const prevActiveRef = useRef(false)
+
+  // Saved original camera state
+  const savedRef = useRef({ pos: new THREE.Vector3(), tgt: new THREE.Vector3() })
+
+  // Per-stop computed camera destinations: [{ pos, tgt }, …]
+  const stopsRef = useRef([])
+  // Total number of phases: (stops * 2) lerp+hold per stop, +1 final lerp back
+  const totalPhasesRef = useRef(0)
+
+  // Scratch vectors
+  const _fromPos = useRef(new THREE.Vector3())
+  const _fromTgt = useRef(new THREE.Vector3())
+  const _toPos = useRef(new THREE.Vector3())
+  const _toTgt = useRef(new THREE.Vector3())
 
   useFrame((state, delta) => {
     if (!controlsRef.current) controlsRef.current = state.controls
     const controls = controlsRef.current
 
     // ── Detect rising edge of `active` ──
-    if (active && !prevActiveRef.current && targetPos && controls) {
+    if (active && !prevActiveRef.current && controls) {
+      // Normalise targets (support legacy single targetPos prop too)
+      const raw = targets ?? (targetPos ? [targetPos] : [])
+      if (raw.length === 0) { prevActiveRef.current = active; return }
+
       savedRef.current.pos.copy(camera.position)
       savedRef.current.tgt.copy(controls.target)
 
-      // Destination target: keep the original look-at offset and slightly nudge it up
-      destTgtRef.current.set(targetPos.x, lookAtYOffset + 0.5, targetPos.z)
+      // Build camera destination for each stop
+      const baseOffset = camera.position.clone().sub(controls.target)
+      const stops = raw.map((wp) => {
+        const tgt = new THREE.Vector3(wp.x, lookAtYOffset + 0.5, wp.z)
+        const off = baseOffset.clone().multiplyScalar(zoomAmount)
+        off.y -= 1.5
+        const pos = tgt.clone().add(off)
+        if (pos.y < 0.5) pos.y = 0.5
+        return { pos, tgt }
+      })
 
-      // Calculate new camera position
-      const offset = camera.position.clone().sub(controls.target)
-      
-      // Keep the current angle but zoom in
-      offset.multiplyScalar(zoomAmount)
-      
-      // Subtly lower the camera relative to its current angle
-      offset.y -= 1.5 // Just drop a little vertically
-      
-      destPosRef.current.copy(destTgtRef.current).add(offset)
-      if (destPosRef.current.y < 0.5) destPosRef.current.y = 0.5 // Prevent clipping the ground
-
+      stopsRef.current = stops
+      // phases: for N stops → lerp1 hold1 lerp2 hold2 … lerpN holdN lerpBack
+      totalPhasesRef.current = stops.length * 2 + 1
       phaseRef.current = 1
       timerRef.current = 0
       controls.enabled = false
@@ -76,42 +90,64 @@ export function CameraCutscene({
     const phase = phaseRef.current
     if (phase === 0 || !controls) return
 
-    // Clamp delta to avoid a big jump if a frame spike occurs (e.g. React re-renders)
     timerRef.current += Math.min(delta, 0.033)
 
-    if (phase === 1) {
-      const t = Math.min(1, timerRef.current / lerpDuration)
+    const stops = stopsRef.current
+    const totalPhases = totalPhasesRef.current
+    const isLastLerp = phase === totalPhases // final lerp back to saved
+    const isLerp = phase % 2 === 1
+    const isHold = phase % 2 === 0
+
+    if (isLerp) {
+      const duration = isLastLerp ? lerpDuration : lerpDuration * 0.7
+      const t = Math.min(1, timerRef.current / duration)
       const e = easeInOut(t)
 
-      camera.position.lerpVectors(savedRef.current.pos, destPosRef.current, e)
-      controls.target.lerpVectors(savedRef.current.tgt, destTgtRef.current, e)
+      // Determine from/to for this lerp
+      if (isLastLerp) {
+        // Lerping back to saved from the last stop
+        const lastStop = stops[stops.length - 1]
+        _fromPos.current.copy(lastStop.pos)
+        _fromTgt.current.copy(lastStop.tgt)
+        _toPos.current.copy(savedRef.current.pos)
+        _toTgt.current.copy(savedRef.current.tgt)
+      } else {
+        const stopIdx = Math.floor(phase / 2) // which stop we're heading toward
+        const stop = stops[stopIdx]
+        _toPos.current.copy(stop.pos)
+        _toTgt.current.copy(stop.tgt)
+        if (stopIdx === 0) {
+          _fromPos.current.copy(savedRef.current.pos)
+          _fromTgt.current.copy(savedRef.current.tgt)
+        } else {
+          _fromPos.current.copy(stops[stopIdx - 1].pos)
+          _fromTgt.current.copy(stops[stopIdx - 1].tgt)
+        }
+      }
+
+      camera.position.lerpVectors(_fromPos.current, _toPos.current, e)
+      controls.target.lerpVectors(_fromTgt.current, _toTgt.current, e)
       camera.lookAt(controls.target)
 
       if (t >= 1) {
-        phaseRef.current = 2
-        timerRef.current = 0
+        if (isLastLerp) {
+          // Done
+          camera.position.copy(savedRef.current.pos)
+          controls.target.copy(savedRef.current.tgt)
+          controls.enabled = true
+          phaseRef.current = 0
+          timerRef.current = 0
+          onComplete?.()
+        } else {
+          // Advance to the hold phase
+          phaseRef.current = phase + 1
+          timerRef.current = 0
+        }
       }
-    } else if (phase === 2) {
+    } else if (isHold) {
       if (timerRef.current >= holdDuration) {
-        phaseRef.current = 3
+        phaseRef.current = phase + 1
         timerRef.current = 0
-      }
-    } else if (phase === 3) {
-      const t = Math.min(1, timerRef.current / lerpDuration)
-      const e = easeInOut(t)
-
-      camera.position.lerpVectors(destPosRef.current, savedRef.current.pos, e)
-      controls.target.lerpVectors(destTgtRef.current, savedRef.current.tgt, e)
-      camera.lookAt(controls.target)
-
-      if (t >= 1) {
-        camera.position.copy(savedRef.current.pos)
-        controls.target.copy(savedRef.current.tgt)
-
-        controls.enabled = true
-        phaseRef.current = 0
-        timerRef.current = 0
-        onComplete?.()
       }
     }
   })
